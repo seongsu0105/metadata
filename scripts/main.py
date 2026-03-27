@@ -3,6 +3,37 @@ import json
 import re
 from PyPDF2 import PdfReader
 from kiwipiepy import Kiwi
+import requests
+
+
+METADATA_SYSTEM = (
+    "당신은 법률 원문을 분석하여 요약·메타데이터를 생성하는 AI입니다. 매 요청마다 system으로 전달되는 지시와 출력 형식을 그대로 따르세요."
+    "역할: [대상 텍스트]만 보고 DB 저장용 메타데이터를 키:값 한 줄씩 출력한다.\n\n"
+    "[절대 순서 — 반드시 이 순서로 4줄만 출력]\n"
+    "1) 첫 줄: title: (실제 제목 문자열)\n"
+    "2) 둘째 줄: bc_id: (숫자)\n"
+    "3) 셋째 줄: sc_keyword: (핵심 단어 최대 2개, 반드시 쉼표로만 구분. 예: 전력, 송전)\n"
+    "4) 넷째 줄: tl_summary: (세 문장, 한 줄로)\n\n"
+    "[title — 최우선·생략 절대 금지]\n"
+    "- 출력의 반드시 첫 번째 줄은 title: 로 시작해야 한다.\n"
+    '- title 값은 빈 칸·"제목 없음"·"N/A"·"해당 없음"·"미정" 금지. 반드시 구체적인 법률안·안건 명칭을 한글로 채운다.\n'
+    "- 찾는 순서: (가) '## 제목' 또는 '1. ## 제목' 바로 아래 한 줄 (나) '의안명'·'법률안 명' 근처 문장 (다) 첫머리에 나온 안건명·법령명 전체 (라) 그래도 없으면 문서 맨 앞 80자 이내 핵심 명사구를 붙여 하나의 제목 문장으로 만든다(빈 값 금지).\n"
+    "- 요약에 '## 제목 (○○법률안)'처럼 나오면 title 값은 괄호 안 ○○만 넣는다. '## 제목', '#', '제목' 레이블·괄호 자체는 title에 넣지 않는다.\n"
+    "- 마크다운 기호(##, **)는 title 값에 넣지 말고 법률안·안건 공식 명칭 문장만 한 줄로.\n\n"
+    "[bc_id]\n"
+    "- [빅카테고리(bc_id) 선택 목록]에 있는 id 숫자만. 목록에 없는 숫자·임의 숫자 금지. 애매하면 목록 중 가장 가까운 하나.\n\n"
+    "[sc_keyword]\n"
+    "- 법안이 직접 다루는 대상(직군·계층·제도명 등) 단어 하나.\n\n"
+    "- 반드시 '조사(~및, ~에 관한, ~등)'를 제거한 완성된 명사형으로 출력하라.\n"
+    "- 예: '공예문화산업진흥법및' (X) -> '공예문화산업법' (O)\n\n"
+    "[tl_summary]\n"
+    "- 반드시 세 문장(마침표 3개 이상). ①개정 결론(무엇이 어떻게 바뀌는지) ②변경 전·후 ③시행일. "
+    "- 문장 내 '있 음', '개 정 안'과 같은 비정상적 공백은 반드시 제거하여 자연스러운 문장으로 작성하라.\n"
+    "- 내용은 ①현행법의 한계 ②개정안의 핵심 내용 ③기대 효과를 포함하여 세 문장으로 구성하라.\n"
+    '"요약 없음"·한 문장만·빈 값 금지.\n\n'
+    "[공통]\n"
+    "- 설명·인사·JSON·코드펜스·추가 줄 금지. 위 4키만, 키 이름 철자 정확히 title, bc_id, sc_keyword, tl_summary.\n"
+)
 
 # ==============================
 # 1. 카테고리
@@ -62,33 +93,28 @@ def assign_bc_id(text):
     return max(scores, key=scores.get)
 
 
-METADATA_SYSTEM = (
-    "역할: [대상 텍스트]만 보고 DB 저장용 메타데이터를 키:값 한 줄씩 출력한다.\n\n"
-    "[절대 순서 — 반드시 이 순서로 4줄만 출력]\n"
-    "1) 첫 줄: title: (실제 제목 문자열)\n"
-    "2) 둘째 줄: bc_id: (숫자)\n"
-    "3) 셋째 줄: sc_keyword: (핵심 단어 최대 2개, 반드시 쉼표로만 구분. 예: 전력, 송전)\n"
-    "4) 넷째 줄: tl_summary: (세 문장, 한 줄로)\n\n"
-    "[title — 최우선·생략 절대 금지]\n"
-    "- 출력의 반드시 첫 번째 줄은 title: 로 시작해야 한다.\n"
-    '- title 값은 빈 칸·"제목 없음"·"N/A"·"해당 없음"·"미정" 금지. 반드시 구체적인 법률안·안건 명칭을 한글로 채운다.\n'
-    "- 찾는 순서: (가) '## 제목' 또는 '1. ## 제목' 바로 아래 한 줄 (나) '의안명'·'법률안 명' 근처 문장 (다) 첫머리에 나온 안건명·법령명 전체 (라) 그래도 없으면 문서 맨 앞 80자 이내 핵심 명사구를 붙여 하나의 제목 문장으로 만든다(빈 값 금지).\n"
-    "- 요약에 '## 제목 (○○법률안)'처럼 나오면 title 값은 괄호 안 ○○만 넣는다. '## 제목', '#', '제목' 레이블·괄호 자체는 title에 넣지 않는다.\n"
-    "- 마크다운 기호(##, **)는 title 값에 넣지 말고 법률안·안건 공식 명칭 문장만 한 줄로.\n\n"
-    "[bc_id]\n"
-    "- [빅카테고리(bc_id) 선택 목록]에 있는 id 숫자만. 목록에 없는 숫자·임의 숫자 금지. 애매하면 목록 중 가장 가까운 하나.\n\n"
-    "[sc_keyword]\n"
-    "- 법안이 직접 다루는 대상(직군·계층·제도명 등) 단어 하나.\n\n"
-    "- 반드시 '조사(~및, ~에 관한, ~등)'를 제거한 완성된 명사형으로 출력하라.\n"
-    "- 예: '공예문화산업진흥법및' (X) -> '공예문화산업법' (O)\n\n"
-    "[tl_summary]\n"
-    "- 반드시 세 문장(마침표 3개 이상). ①개정 결론(무엇이 어떻게 바뀌는지) ②변경 전·후 ③시행일. "
-    "- 문장 내 '있 음', '개 정 안'과 같은 비정상적 공백은 반드시 제거하여 자연스러운 문장으로 작성하라.\n"
-    "- 내용은 ①현행법의 한계 ②개정안의 핵심 내용 ③기대 효과를 포함하여 세 문장으로 구성하라.\n"
-    '"요약 없음"·한 문장만·빈 값 금지.\n\n'
-    "[공통]\n"
-    "- 설명·인사·JSON·코드펜스·추가 줄 금지. 위 4키만, 키 이름 철자 정확히 title, bc_id, sc_keyword, tl_summary.\n"
-)
+# ==============================
+#  ollama api 연결
+# ==============================
+
+
+def generate_summary_ollama(text: str, bc_block: str) -> str:
+    prompt = metadata_user_prompt(text, bc_block)
+
+    response = requests.post(
+        "http://localhost:11434/api/generate",
+        json={
+            "model": "llama3.2:3b",
+            "system": METADATA_SYSTEM,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.3,  # 낮을수록 일관성 있음
+                "num_predict": 300,  # 요약 길이 제한
+            },
+        },
+    )
+    return response.json()["response"].strip()
 
 
 # ==============================
@@ -293,8 +319,10 @@ def extract_summary(text):
 def process_all():
     pdf_dir = "pdfdata"
     output_path = "dataset.jsonl"
-
     results = []
+
+    # bc_block 한 번만 생성
+    bc_block = build_big_categories_block(DB_BIG_CATEGORIES)
 
     for file in os.listdir(pdf_dir):
         if not file.endswith(".pdf"):
@@ -307,16 +335,26 @@ def process_all():
             text = " ".join(
                 [p.extract_text() for p in reader.pages if p.extract_text()]
             )
-
             text = clean_text(text)
 
             if len(text) < 100:
                 continue
 
-            title = extract_title(text)
-            bc_id = assign_bc_id(text)
-            keyword = extract_keyword(title)
-            summary = extract_summary(text)
+            # ollama로 한번에 생성
+            raw_output = generate_summary_ollama(text, bc_block)
+
+            # 파싱
+            output_lines = {}
+            for line in raw_output.splitlines():
+                if ": " in line:
+                    key, val = line.split(": ", 1)
+                    output_lines[key.strip()] = val.strip()
+
+            # fallback
+            title = output_lines.get("title") or extract_title(text)
+            bc_id = output_lines.get("bc_id") or assign_bc_id(text)
+            keyword = output_lines.get("sc_keyword") or extract_keyword(title)
+            summary = output_lines.get("tl_summary") or ""
 
             output = (
                 f"title: {title}\n"
