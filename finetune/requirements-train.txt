@@ -1,0 +1,9 @@
+# Colab / Kaggle GPU 노트북용 (로컬 Windows CPU 학습에는 일부 패키지 제약 있을 수 있음)
+torch>=2.1.0
+transformers>=4.40.0
+datasets>=2.18.0
+accelerate>=0.28.0
+peft>=0.11.0
+trl>=0.9.0
+bitsandbytes>=0.43.0
+safetensors>=0.4.0

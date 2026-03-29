@@ -1,0 +1,6 @@
+# 메타데이터 스크립트 (main.py, pure_metadata_export.py 등)
+# Python 3.10+ 권장 (typing 문법 기준)
+
+requests>=2.28.0
+PyPDF2>=3.0.0
+kiwipiepy>=0.17.0
