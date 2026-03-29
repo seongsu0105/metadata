@@ -2,6 +2,14 @@
 
 `../scripts/main.py`로 만든 **`finetune_dataset.jsonl`**(각 줄: `instruction`, `input`, `output`)을 넣고, 이 폴더의 `train_lora.py`로 어댑터를 학습한다.
 
+## 로컬 vs Colab 역할 (꼭 확인)
+
+- **Colab에는 `finetune_dataset.jsonl`을 꼭 올린다.** `train_lora.py`는 이 형식(`instruction` / `input` / `output`)만 받는다. `metadata.jsonl`만으로는 이 스크립트를 그대로 쓸 수 없다.
+- **`main.py`에서 `WRITE_FINETUNE = True`** 여야 `finetune_dataset.jsonl`이 생성된다. 파일이 없으면 로컬에서 `WRITE_FINETUNE`을 켜고 `main.py`를 다시 돌리거나, 동일 스키마로 직접 만든다.
+- **`main.py`의 Ollama는 Colab과 무관하다.** PDF 추출·Ollama HTTP 호출은 **로컬**(또는 Ollama가 떠 있는 PC)에서 끝낸 뒤, Colab에는 **만들어진 JSONL + `train_lora.py` + `requirements-train.txt`**(또는 동일 pip 목록)만 가져가면 된다.
+- **Colab:** 런타임을 **GPU**로 바꾸고, `colab_kaggle.ipynb`의 **`DATA_PATH` / `OUTPUT_DIR`**(또는 터미널의 `--data` / `--out`)을 본인 업로드 경로에 맞게 수정한다.
+- **게이트된 베이스 모델**(일부 Llama 등)을 쓰면 Hugging Face **`HF_TOKEN`**을 Colab Secrets 또는 환경 변수로 넣는다.
+
 ## 준비물
 
 - GPU 런타임: Colab **GPU**(T4 이상 권장) / Kaggle Notebook **GPU** 켜기
