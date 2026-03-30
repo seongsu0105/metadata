@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--base-model",
         type=str,
-        default="MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M",
+        default="Qwen/Qwen2.5-1.5B-Instruct",
         help="베이스 Causal LM (허브 id 또는 로컬 경로)",
     )
     p.add_argument("--epochs", type=float, default=2.0)
@@ -91,11 +91,9 @@ def main() -> None:
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=(
-                torch.bfloat16
-                if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-                else torch.float16
-            ),
+            bnb_4bit_compute_dtype=torch.bfloat16
+            if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+            else torch.float16,
             bnb_4bit_use_double_quant=True,
         )
 
