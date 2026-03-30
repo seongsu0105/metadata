@@ -2,6 +2,8 @@ import os
 import json
 import re
 import time
+import unicodedata
+from dataclasses import dataclass
 from typing import Any
 import requests
 from requests.exceptions import ConnectionError as RequestsConnectionError
@@ -12,17 +14,29 @@ from kiwipiepy import Kiwi
 # ---------------------------------------------------------------------------
 # 산출물
 # - metadata.jsonl: DB·배포용 순수 메타데이터 (본 역할)
-# - finetune_dataset.jsonl: instruction/input/output 학습용 (선택)
+# - finetune_dataset.jsonl: 메타데이터(key:값 4줄) LoRA 학습용 (선택)
+#   → Worker의 metadata_user_prompt + METADATA_SYSTEM 과 동일 계약이어야
+#     추론·학습이 맞물린다. (docs/ex/summary_prompts.py METADATA_* 와 동일)
+# - 6단원 마크다운 요약(SUMMARY_SYSTEM_FINAL 등)은 태스크가 다름.
+#   본 스크립트는 생성하지 않음. 필요 시 Worker·별도 파이프라인으로
+#   instruction/output 형식이 다른 JSONL을 만든다.
 # ---------------------------------------------------------------------------
 METADATA_JSONL = "metadata.jsonl"
 FINETUNE_JSONL = "finetune_dataset.jsonl"
 WRITE_FINETUNE = True
+# 학습 input 상한·앵커(규칙 R10)
+FINETUNE_INPUT_MAX_CHARS = 6000
+FINETUNE_ANCHOR_MARGIN = 400
 
 PDF_DIR = "pdfdata"
+# 동일 폴더에 두면 from→to 치환을 추가 적용 (도메인 전용 보정, 없어도 동작)
+SANITIZE_OVERRIDES_JSON = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "metadata_sanitize_overrides.json"
+)
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:3b"
-# title~tl_summary 4줄 + 세 문장 요약이 중간에 끊기지 않도록 여유 있게 설정
-OLLAMA_NUM_PREDICT = 1536
+# 메타 4줄만 생성 시 1024면 대부분 충분. 잘림이 잦으면 1280~1536으로 올리기.
+OLLAMA_NUM_PREDICT = 1024
 # Ollama가 응답을 끝낼 때까지 기다리는 최대 시간(초).
 # 짧으면 Read timed out — PDF가 길거나 GPU가 느리면 300초를 넘기기 쉽다.
 OLLAMA_CONNECT_TIMEOUT = 30
@@ -30,37 +44,67 @@ OLLAMA_READ_TIMEOUT = 900
 # 타임아웃·일시 연결 실패 시 재시도 횟수(추가)
 OLLAMA_HTTP_RETRIES = 2
 
+# ----- Worker summary_prompts.py 와 동일 계약 (메타데이터 전용) -----
+BASE_SYSTEM_COMMON = (
+    "공통 규칙:\n"
+    "- 제공된 텍스트 근거만 사용하고 추정/환각 금지\n"
+    "- 원문에 없는 수치·날짜·고유명사를 지어내지 말 것\n"
+    "- 불명확한 항목은 단정하지 말고 '원문상 명시 없음'으로 처리\n"
+    "- 불필요한 인사말/변명/자기설명 금지\n"
+)
+
 METADATA_SYSTEM = (
-    "당신은 법률 원문을 분석하여 요약·메타데이터를 생성하는 AI입니다. 매 요청마다 system으로 전달되는 지시와 출력 형식을 그대로 따르세요."
-    "역할: [대상 텍스트]만 보고 DB 저장용 메타데이터를 키:값 한 줄씩 출력한다.\n\n"
-    "[절대 순서 — 반드시 이 순서로 4줄만 출력]\n"
-    "1) 첫 줄: title: (실제 제목 문자열)\n"
-    "2) 둘째 줄: bc_id: (숫자)\n"
-    "3) 셋째 줄: sc_keyword: (핵심 단어 최대 2개, 반드시 쉼표로만 구분. 예: 전력, 송전)\n"
-    "4) 넷째 줄: tl_summary: (세 문장, 한 줄로)\n\n"
-    "[title — 최우선·생략 절대 금지]\n"
-    '- title 값은 빈 칸·"제목 없음"·"N/A"·"해당 없음"·"미정" 금지. 반드시 구체적인 법률안·안건 명칭을 한글로 채운다.\n'
-    "- 찾는 순서: (가) '## 제목' 또는 '1. ## 제목' 바로 아래 한 줄 (나) '의안명'·'법률안 명' 근처 문장 (다) 첫머리에 나온 안건명·법령명 전체 (라) 그래도 없으면 문서 맨 앞 80자 이내 핵심 명사구를 붙여 하나의 제목 문장으로 만든다(빈 값 금지).\n"
-    "- 요약에 '## 제목 (○○법률안)'처럼 나오면 title 값은 괄호 안 ○○만 넣는다. '## 제목', '#', '제목' 레이블·괄호 자체는 title에 넣지 않는다.\n"
-    "- 마크다운 기호(##, **)는 title 값에 넣지 말고 법률안·안건 공식 명칭 문장만 한 줄로.\n\n"
-    "[bc_id]\n"
-    "- 반드시 시스템에 붙은 [대분류(bc_id) 선택 목록]에 나온 id(1~10)만 사용한다.\n"
-    "- 의안번호·법령번호·연도 등 다른 숫자를 bc_id에 넣지 말 것.\n"
-    "- 목록에 없는 숫자·임의 숫자 금지.\n\n"
-    "[sc_keyword]\n"
-    "- 법안이 직접 다루는 대상(직군·계층·제도명 등) 단어 하나.\n\n"
-    "- 반드시 '조사(~및, ~에 관한, ~등)'를 제거한 완성된 명사형으로 출력하라.\n"
-    "- 예: '공예문화산업진흥법및' (X) -> '공예문화산업법' (O)\n\n"
-    "[tl_summary]\n"
-    "- 반드시 세 문장(마침표 3개 이상). 각 문장은 주어·서술어를 갖춘 **완결 문장**으로 끝낸다. 중간에 끊기지 않게 한다.\n"
-    "- ① 개정 취지(무엇이 어떻게 바뀌는지) ② 문제 인식 또는 개정 전·후 ③ 시행일·기대 효과·정리 중 하나로 마무리.\n"
-    "- **출력 문자**: 한글·숫자·공백·마침표·쉼표·가운뎃점(ㆍ) 위주. 영단어·독일어 등 라틴 문자, 일본어, 중국어 **간체·한자 단독 표기 금지**(법 용어는 한글로 풀어쓴다. 예: 죄, 퇴직, 규정).\n"
-    "- 조문 번호 나열·'(생략)'·'∼' 위주 인용·정의 조항 베끼기 금지. 법안 **이유·취지** 수준으로만 요약한다.\n"
-    "- 띄어쓰기 규칙을 지켜 읽기 쉬운 문장으로 쓴다. 글자를 붙여 한 줄로만 쓰지 말 것.\n"
-    "- 문장 내 '있 음', '개 정 안', '배 우자' 같이 어색하게 끼인 공백 금지.\n"
-    '"요약 없음"·한 문장만·빈 값 금지.\n\n'
-    "[공통]\n"
-    "- 설명·인사·JSON·코드펜스·추가 줄 금지. 위 4키만, 키 이름 철자 정확히 title, bc_id, sc_keyword, tl_summary.\n"
+    BASE_SYSTEM_COMMON
+    + "역할: [대상 텍스트]만 보고 DB 저장용 메타데이터를 키:값 한 줄씩 출력한다.\n"
+    + "출력은 검색 인덱싱 품질 최적화를 목표로 한다.\n\n"
+    + "[절대 순서 — 반드시 이 순서로 4줄만 출력]\n"
+    + "1) 첫 줄: title: (실제 제목 문자열)\n"
+    + "2) 둘째 줄: bc_id: (숫자)\n"
+    + "3) 셋째 줄: sc_keyword: (핵심 단어 최대 2개, 반드시 쉼표로만 구분. 예: 전력, 송전)\n"
+    + "4) 넷째 줄: tl_summary: (세 문장, 한 줄로)\n\n"
+    + "[title — 최우선·생략 절대 금지]\n"
+    + "- 출력의 반드시 첫 번째 줄은 title: 로 시작해야 한다.\n"
+    + '- title 값은 빈 칸·"제목 없음"·"N/A"·"해당 없음"·"미정" 금지. 반드시 구체적인 법률안·안건 명칭을 한글로 채운다.\n'
+    + "- 찾는 순서: (가) '## 제목' 또는 '1. ## 제목' 바로 아래 한 줄 (나) '의안명'·'법률안 명' 근처 문장 (다) 첫머리에 나온 안건명·법령명 전체 (라) 그래도 없으면 문서 맨 앞 80자 이내 핵심 명사구를 붙여 하나의 제목 문장으로 만든다(빈 값 금지).\n"
+    + "- 요약에 '## 제목 (○○법률안)'처럼 나오면 title 값은 괄호 안 ○○만 넣는다. '## 제목', '#', '제목' 레이블·괄호 자체는 title에 넣지 않는다.\n"
+    + "- 마크다운 기호(##, **)는 title 값에 넣지 말고 법률안·안건 공식 명칭 문장만 한 줄로.\n\n"
+    + "[bc_id]\n"
+    + "- 사용자 메시지에 붙은 [빅카테고리(bc_id) 선택 목록]에 있는 id 숫자만. "
+    + "목록에 없는 숫자·임의 숫자 금지. 애매하면 목록 중 가장 가까운 하나.\n\n"
+    + "[sc_keyword]\n"
+    + "- 법안이 직접 다루는 대상(직군·계층·제도명 등) 단어 최대 2개.\n"
+    + "- 지나치게 일반적인 단어(정책, 법률, 개선, 제도)는 지양.\n"
+    + "- '조사(~및, ~에 관한, ~등)'를 제거한 완성된 명사형으로 출력. 예: '공예문화산업진흥법및' (X) → '공예문화산업법' (O)\n\n"
+    + "[tl_summary]\n"
+    + "- 반드시 세 문장(마침표 3개 이상). ①개정 결론(무엇이 어떻게 바뀌는지) ②변경 전·후 ③시행일. "
+    + '"요약 없음"·한 문장만·빈 값 금지.\n'
+    + "- 완성형 한글 음절로만 작성. 음절과 받침(종성) 사이에 공백 금지.\n"
+    + "- 조문 통째 인용·'(생략)'·정의 조항만 베끼지 말고 제안 취지 수준으로 요약.\n\n"
+    + "[공통]\n"
+    + "- 설명·인사·JSON·코드펜스·추가 줄 금지. 위 4키만, 키 이름 철자 정확히 title, bc_id, sc_keyword, tl_summary.\n"
+)
+
+# ----- Worker: 6단원 요약·구간 추출 (학습 데이터는 별도 JSONL·별도 생성 파이프라인) -----
+SUMMARY_SYSTEM_FINAL = (
+    BASE_SYSTEM_COMMON
+    + "역할: 국회 의안 분석 요약관.\n"
+    + "법률 원문/구간메모를 근거로 요약문만 출력하세요. 마크다운 형식.\n"
+    + "6단원 반드시 순서대로, 모두 작성. 생략 금지.\n"
+    + "분량은 700~1100자 권장. 지나치게 짧은 제목형 출력 금지.\n"
+    + "1. ## 제목 \n"
+    + "2. ## 의안번호·발의연원일·발의자\n"
+    + "3. ## 제안이유 및 주요내용\n"
+    + "4. ## 개정법률안\n"
+    + "5. ## 부칙\n"
+    + "6. ## 신·구조문대비표\n"
+    + "핵심만 간결히 쓰되, 사안의 배경·쟁점·변경 전후를 빠뜨리지 마세요. 조문 통째 인용 금지.\n"
+)
+
+SUMMARY_SYSTEM_PARTIAL = (
+    BASE_SYSTEM_COMMON
+    + "역할: 장문 법안을 구간 단위로 추출하는 팩트 추출기.\n"
+    + "구간만 읽고 사실만 bullet(-)로 짧게 작성.\n"
+    + "JSON·인사말·## 대제목·6단원 구조 금지. 반복 금지.\n"
 )
 
 # ==============================
@@ -85,11 +129,6 @@ VALID_BC_IDS = {int(c["id"]) for c in DB_BIG_CATEGORIES}
 # ==============================
 # 2. bc_id
 # ==============================
-
-FINETUNE_INSTRUCTION = (
-    "당신은 법률 원문을 분석하여 요약·메타데이터를 생성하는 AI입니다. "
-    "매 요청마다 system으로 전달되는 지시와 출력 형식을 그대로 따르세요."
-)
 
 
 def assign_bc_id(text: str) -> int:
@@ -135,6 +174,8 @@ def normalize_bc_id(raw: Any, text: str) -> int:
     m = re.search(r"(\d+)", s)
     if m:
         n = int(m.group(1))
+        if n == 0:
+            return assign_bc_id(text)
         if n in VALID_BC_IDS:
             return n
     return assign_bc_id(text)
@@ -150,6 +191,7 @@ def parse_llm_metadata_block(raw: str) -> dict[str, str]:
         r"^\s*(title|bc_id|sc_keyword|tl_summary)\s*:\s*(.*)$",
         re.IGNORECASE,
     )
+    last_key: str | None = None
     for line in text.splitlines():
         line = line.rstrip()
         if not line.strip():
@@ -158,12 +200,17 @@ def parse_llm_metadata_block(raw: str) -> dict[str, str]:
         if m:
             k = m.group(1).lower()
             out[k] = m.group(2).strip()
+            last_key = k
+            continue
+        if last_key == "tl_summary" and line.strip():
+            out["tl_summary"] = (out.get("tl_summary", "") + " " + line.strip()).strip()
             continue
         if ": " in line:
             k, _, v = line.partition(": ")
             key = k.strip()
             if key in ("title", "bc_id", "sc_keyword", "tl_summary") and key not in out:
                 out[key] = v.strip()
+                last_key = key
     return out
 
 
@@ -218,25 +265,41 @@ def generate_summary_ollama(text: str, bc_block: str) -> str:
 
 
 def build_big_categories_block(big_categories: list[dict] | None) -> str:
+    """Worker `summary_prompts.build_big_categories_block` 과 동일 형식."""
     if not big_categories:
         return ""
-    pairs = [
-        f"{int(c['id'])}: {c['name']}"
-        for c in big_categories
-        if c.get("id") is not None
-    ]
-    return "[대분류(bc_id) 선택 목록]\n" + ", ".join(pairs) + "\n\n"
+    pairs: list[str] = []
+    for c in big_categories:
+        cid = c.get("id")
+        name = (c.get("name", "") or "").strip()
+        if cid is None:
+            continue
+        try:
+            cid_int = int(cid)
+        except (TypeError, ValueError):
+            continue
+        pairs.append(f"{cid_int}: {name}")
+    if not pairs:
+        return ""
+    return "[빅카테고리(bc_id) 선택 목록]\n" + ", ".join(pairs) + "\n\n"
 
 
 def metadata_user_prompt(
     summary: str, bc_block: str, max_summary_chars: int = 4000
 ) -> str:
+    """Worker `metadata_user_prompt` 와 동일 계약."""
     snip = (summary or "").strip()[:max_summary_chars]
+    bc_fallback = (
+        ""
+        if bc_block
+        else "주의: [빅카테고리 선택 목록]이 없으므로 둘째 줄은 반드시 'bc_id: 0'으로 출력하라.\n\n"
+    )
     return (
         f"{bc_block}"
+        f"{bc_fallback}"
         "지시: 아래 [대상 텍스트]에서 법률안·안건 제목을 찾아 반드시 첫 줄에 title: 로 출력하라. "
-        "bc_id는 위 목록의 1~10 중 하나만. 의안번호·다른 숫자는 bc_id에 쓰지 말 것. "
-        "네 번째 줄 tl_summary까지 반드시 출력하라. "
+        "제목을 찾지 못했다고 비우지 말고, 텍스트 상단에서 가장 구체적인 명칭 한 줄을 title로 써라. "
+        "요약에 '## 제목 (명칭)' 형태면 title에는 괄호 안 명칭만, 샵·마크다운·레이블은 넣지 말 것. "
         "sc_keyword는 쉼표로 구분한 짧은 단어 최대 2개만.\n\n"
         "[대상 텍스트]\n"
         f"{snip}\n"
@@ -251,67 +314,201 @@ def clean_text(text: str) -> str:
     return text
 
 
-# LLM 출력에 섞이기 쉬운 오탈·이종 문자 (긴 것부터)
-_SUBSTR_FIXES: tuple[tuple[str, str], ...] = (
-    ("자sal위해", "자살 위해"),
-    ("자Sal위해", "자살 위해"),
-    ("제19조삭 제", "제19조 삭제"),
-    ("없음 이분명한", "없음이 분명한"),
-    ("임 기를", "임의를"),
-    ("1 00분의", "100분의"),
-    (" 입찰 참 gia ", " 입찰 참가 "),
-    ("참 gia ", "참가 "),
-    (" gia ", " 가 "),
-    (" address한다", " 보완한다"),
-    ("Regel", "규정"),
-    ("regel", "규정"),
-    ("배 우자", "배우자"),
-    ("수급권 자", "수급권자"),
+# ---------------------------------------------------------------------------
+# 메타데이터 후처리 규칙 (문서 종류와 무관하게 동일 적용)
+# ---------------------------------------------------------------------------
+# R1  유니코드 NFC
+# R2  한글 음절–종성(U+11A8–11FF) 사이 공백 제거 후 재결합
+# R3  조사 앞 불필요 공백(해임 을 등) 정리
+# R4  법령 수치에서 흔한 숫자 분절(1 00분의 등) 공백 제거
+# R5  sc_keyword·요약: 라틴 알파벳 연속 토큰(5자 이상) 제거(외국어 혼입 완화)
+# R6  요약: 조문·생략·정의 붙여넣기 패턴이면 규칙 추출로 교체
+# R7  요약: 라틴/이종 문자 비율·베트남어 문자 존재 시 규칙 추출
+# R8  제목: 원문 부재·과도하게 짧으면 휴리스틱 제목
+# R9  키워드: 본문 출현 과반 미달 시 제목 기반 재추출 + 허용 문자 집합
+# R10 요약: 문장 부호·길이 기반 비정상 종료 시 규칙 추출
+# R11 선택: metadata_sanitize_overrides.json 의 from→to (조직별만)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MetadataPostprocessRules:
+    summary_min_chars: int = 40
+    summary_min_sentence_punct: int = 2
+    summary_max_latin_to_hangul_ratio: float = 0.22
+    summary_latin_count_for_ratio: int = 18
+    keyword_plausibility_blob_chars: int = 12000
+    title_presence_check_chars: int = 5000
+    title_min_guess_chars: int = 8
+    latin_token_strip_min_len: int = 5
+
+
+RULES = MetadataPostprocessRules()
+_OVERRIDES_CACHE: list[tuple[str, str]] | None = None
+
+
+def _load_sanitize_overrides() -> list[tuple[str, str]]:
+    global _OVERRIDES_CACHE
+    if _OVERRIDES_CACHE is not None:
+        return _OVERRIDES_CACHE
+    acc: list[tuple[str, str]] = []
+    if os.path.isfile(SANITIZE_OVERRIDES_JSON):
+        try:
+            with open(SANITIZE_OVERRIDES_JSON, encoding="utf-8") as f:
+                data = json.load(f)
+            for item in data:
+                if isinstance(item, dict) and "from" in item and "to" in item:
+                    a, b = str(item["from"]), str(item["to"])
+                    if a:
+                        acc.append((a, b))
+        except (OSError, json.JSONDecodeError):
+            pass
+    _OVERRIDES_CACHE = acc
+    return acc
+
+
+def normalize_hangul_syllables(s: str) -> str:
+    """
+    GPU와 무관. 모델/Kiwi 출력에서 음절과 종성 자모가 공백으로 떨어지는 경우(하 ᆯ)를
+    붙인 뒤 NFC로 완성형으로 만든다. (U+11A8–U+11FF: Hangul Jongseong)
+    """
+    if not s:
+        return s
+    t = s
+    for _ in range(4):
+        t2 = re.sub(r"([가-힣])\s+([\u11A8-\u11FF])", r"\1\2", t)
+        t2 = unicodedata.normalize("NFC", t2)
+        if t2 == t:
+            break
+        t = t2
+    # 흔한 어미만 음절 가운데 잘린 공백 (있 음 등)
+    t = re.sub(r"([가-힣])\s+([음함임됨])(?=[\s\.,]|$)", r"\1\2", t)
+    return unicodedata.normalize("NFC", t)
+
+
+def _apply_numeric_spacing_rule(s: str) -> str:
+    """R4: 법령 숫자 표기에서 한 자리·다자리 사이 잘못 든 공백 제거."""
+    t = re.sub(r"(\d)\s+(\d{2,})\s*(?=[분년월일%]|$)", r"\1\2", s)
+    return re.sub(r"(\d)\s+(\d{2,})(?=\s*[가-힣])", r"\1\2", t)
+
+
+def _strip_long_latin_tokens(s: str) -> str:
+    """R5: 5자 이상 연속 라틴 알파벳 토큰을 공백으로 제거(약어 남기지 않음)."""
+    mnl = RULES.latin_token_strip_min_len
+    t = re.sub(rf"\s*[A-Za-z]{{{mnl},}}\s*", " ", s)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+_SUMMARY_CONTAMINATION_RE = re.compile(
+    r"\(생략\)|1\s*\.?\s*∼\s*\d+|제\s*\d+\s*조\s*\(\s*정의\s*\)|-{10,}|<신설\s*>",
+    re.IGNORECASE,
 )
 
-_HANZI_TO_HANGUL: tuple[tuple[str, str], ...] = (
-    ("위헌결定的", "위헌결정적"),
-    ("규定", "규정"),
-    ("权리", "권리"),
-    ("退직", "퇴직"),
-    ("除く", "제외하고"),
-    ("规定", "규정"),
-    ("罪", "죄"),
-    ("权", "권"),
+_VIETNAM_LATIN_RE = re.compile(
+    r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩị"
+    r"òóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđĐ]"
 )
 
-# 요약이 생성 도중 잘린 것으로 보일 때(폴백: extract_summary)
-_TL_SUMMARY_BAD_ENDINGS: tuple[str, ...] = (
-    "근거",
-    "패러다임",
-    "적시",
-    "연기함",
-    "하고있어임",
-    "미비하여해임",
-    "운송사",
-    "개인으로규정하고있어임",
-    "삭제ㆍ임",
-)
+
+def summary_should_use_extract_fallback(summary: str) -> bool:
+    """R6·R7: 조문 베끼기·이종어 비율."""
+    s = summary or ""
+    if _SUMMARY_CONTAMINATION_RE.search(s):
+        return True
+    if _VIETNAM_LATIN_RE.search(s):
+        return True
+    h = len(re.findall(r"[가-힣]", s))
+    lat = len(re.findall(r"[A-Za-z]", s))
+    if h == 0 and lat > 8:
+        return True
+    if lat >= RULES.summary_latin_count_for_ratio and h > 0:
+        if (lat / h) > RULES.summary_max_latin_to_hangul_ratio:
+            return True
+    return False
+
+
+def scrub_sc_keyword(keyword: str) -> str:
+    """R9: 허용 문자 집합(한글·숫자·쉼표·가운뎃점·공백)."""
+    parts = re.split(r"[,，]", keyword)
+    cleaned: list[str] = []
+    for p in parts:
+        t = re.sub(r"[^\s0-9가-힣·]", "", p).strip()
+        t = _strip_long_latin_tokens(t)
+        t = re.sub(r"\s+", " ", t)
+        if t:
+            cleaned.append(t)
+    return ", ".join(cleaned[:2]) if cleaned else ""
+
+
+def sc_keyword_plausible(keyword: str, text: str, title: str) -> bool:
+    if not keyword or len(keyword.strip()) < 2:
+        return False
+    blob = (text[: RULES.keyword_plausibility_blob_chars] if text else "") + (
+        title or ""
+    )
+    blob_c = re.sub(r"\s+", "", blob)
+    parts = [p.strip() for p in re.split(r"[,，]", keyword) if len(p.strip()) >= 2]
+    if not parts:
+        return False
+    hits = sum(
+        1
+        for p in parts
+        if p in blob or re.sub(r"\s+", "", p) in blob_c
+    )
+    return hits >= (len(parts) + 1) // 2
+
+
+def reconcile_title_with_text(model_title: str, text: str) -> str:
+    """R8."""
+    fb = extract_title(text)
+    base = (model_title or "").strip()
+    if not base:
+        return normalize_llm_output_text(fb)
+    base_n = normalize_llm_output_text(base)
+    fb_n = normalize_llm_output_text(fb)
+    if len(base_n) < RULES.title_min_guess_chars and "법" not in base_n:
+        return fb_n
+    if (
+        base_n not in text[: RULES.title_presence_check_chars]
+        and fb_n in text[: RULES.title_presence_check_chars]
+        and len(fb_n) + 1 >= len(base_n)
+    ):
+        return fb_n
+    return base_n
+
+
+def finetune_input_snippet(text: str, max_chars: int) -> str:
+    """R10: 학습 input — 길면 제안이유·주요내용 앵커 우선."""
+    if len(text) <= max_chars:
+        return text
+    margin = FINETUNE_ANCHOR_MARGIN
+    for anchor in ("제안이유", "제안 이유", "주요내용", "주요 내용"):
+        idx = text.find(anchor)
+        if idx != -1:
+            start = max(0, idx - margin)
+            chunk = text[start : start + max_chars]
+            if len(chunk) >= min(max_chars, max(2000, max_chars // 2)):
+                return chunk[:max_chars]
+    return text[:max_chars]
 
 
 def normalize_llm_output_text(s: str) -> str:
-    """모델·OCR 혼입 문자·흔한 오타를 한국어 쪽으로 정리."""
+    """R1–R4·R11 + 공통 공백 정리."""
     if not s:
         return s
     t = s.replace("\ufeff", "")
-    for a, b in _SUBSTR_FIXES:
+    for a, b in sorted(_load_sanitize_overrides(), key=lambda x: -len(x[0])):
         t = t.replace(a, b)
-    for a, b in _HANZI_TO_HANGUL:
-        t = t.replace(a, b)
-    # 조사 앞 불필요 공백 (예: 해임 을 → 해임을)
+    t = _apply_numeric_spacing_rule(t)
     t = re.sub(
         r"([가-힣]{2,})\s+(을|를|이|가|은|는|과|와)(?=[가-힣\s]|$)",
         r"\1\2",
         t,
     )
+    t = normalize_hangul_syllables(t)
     t = re.sub(r"[ \t]{2,}", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
-    return t
+    return unicodedata.normalize("NFC", t)
 
 
 def loosen_dense_hangul_summary(s: str) -> str:
@@ -321,22 +518,22 @@ def loosen_dense_hangul_summary(s: str) -> str:
     if (s.count(" ") / len(s)) > 0.045:
         return s
     try:
-        return " ".join(tok.form for tok in kiwi.tokenize(s))
+        out = " ".join(tok.form for tok in kiwi.tokenize(s))
+        return normalize_hangul_syllables(out)
     except Exception:
         return s
 
 
 def is_tl_summary_truncated_or_broken(s: str) -> bool:
+    """R10: 특정 단어 나열 없이 길이·마침표 개수·끝 문장부호로만 판단."""
     t = (s or "").strip()
-    if len(t) < 40:
+    if len(t) < RULES.summary_min_chars:
         return True
     periods = t.count(".") + t.count("。")
-    if periods < 2:
+    if periods < RULES.summary_min_sentence_punct:
         return True
-    core = t.rstrip(". …")
-    for end in _TL_SUMMARY_BAD_ENDINGS:
-        if core.endswith(end):
-            return True
+    if len(t) > 80 and not re.search(r"[.!?。…]['\"」\s]*$", t):
+        return True
     return False
 
 
@@ -437,11 +634,13 @@ def extract_summary(text: str) -> str:
     text = re.sub(r"([가-힣]) ([가-힣])", r"\1\2", text)
     text = re.sub(r"([가-힣]) ([가-힣])", r"\1\2", text)
 
-    parts = re.split(r"제안이유(?:및주요내용)?", text)
+    split_rx = r"(?:제안\s*이유|제안이유)(?:및주요내용)?|주요\s*내용"
+    parts = re.split(split_rx, text, maxsplit=1)
     if len(parts) < 2:
-        return text[:480]
+        snip = text[:800].strip()
+        return snip if snip else text[:480]
 
-    target = parts[1]
+    target = parts[-1]
     cutoff = re.search(r"발의자\s*:|법률제\s*호|부\s*칙|신ㆍ구조문|신·구조문", target)
     if cutoff:
         target = target[: cutoff.start()]
@@ -455,9 +654,10 @@ def extract_summary(text: str) -> str:
     sentences = [s.strip() for s in sentences if len(s.strip()) >= 20]
 
     if not sentences:
-        return target[:480]
+        return (target[:800] if target else text[:800]).strip() or text[:480]
 
-    return " ".join(sentences[:3])
+    merged = " ".join(sentences[:4])
+    return merged if len(merged) >= 80 else text[:800].strip() or merged
 
 
 def format_metadata_block(
@@ -480,22 +680,33 @@ def build_record_for_pdf(
     raw_output = generate_summary_ollama(text, bc_block)
     parsed = parse_llm_metadata_block(raw_output)
 
-    title = normalize_llm_output_text(
-        (parsed.get("title") or "").strip() or extract_title(text)
-    )
+    title = reconcile_title_with_text((parsed.get("title") or "").strip(), text)
     bc_id = normalize_bc_id(parsed.get("bc_id"), text)
-    keyword = normalize_llm_output_text(
-        (parsed.get("sc_keyword") or "").strip() or extract_keyword(title)
-    )
+    kw_raw = (parsed.get("sc_keyword") or "").strip() or extract_keyword(title)
+    keyword = scrub_sc_keyword(normalize_llm_output_text(kw_raw))
+    if not keyword or not sc_keyword_plausible(keyword, text, title):
+        keyword = scrub_sc_keyword(
+            normalize_llm_output_text(extract_keyword(title))
+        ) or normalize_llm_output_text(extract_keyword(title))
+
     summary = normalize_llm_output_text((parsed.get("tl_summary") or "").strip())
+    summary = _strip_long_latin_tokens(summary)
     summary = loosen_dense_hangul_summary(summary)
+    if summary_should_use_extract_fallback(summary):
+        summary = normalize_llm_output_text(
+            _strip_long_latin_tokens(
+                loosen_dense_hangul_summary(extract_summary(text))
+            )
+        )
     if (
         not summary
-        or summary.count(".") + summary.count("。") < 2
+        or summary.count(".") + summary.count("。") < RULES.summary_min_sentence_punct
         or is_tl_summary_truncated_or_broken(summary)
     ):
         summary = extract_summary(text)
-        summary = normalize_llm_output_text(loosen_dense_hangul_summary(summary))
+        summary = normalize_llm_output_text(
+            _strip_long_latin_tokens(loosen_dense_hangul_summary(summary))
+        )
 
     block = format_metadata_block(title, bc_id, keyword, summary)
     meta_row = {
@@ -516,7 +727,7 @@ def process_all() -> None:
 
     bc_block = build_big_categories_block(DB_BIG_CATEGORIES)
 
-    for file in os.listdir(pdf_dir):
+    for file in sorted(os.listdir(pdf_dir)):
         if not file.endswith(".pdf"):
             continue
 
@@ -537,8 +748,11 @@ def process_all() -> None:
             if WRITE_FINETUNE:
                 finetune_rows.append(
                     {
-                        "instruction": FINETUNE_INSTRUCTION,
-                        "input": text[:2000],
+                        # Worker 추론 시 system 자리와 동일 문자열 → LoRA가 현장 계약과 맞춤
+                        "instruction": METADATA_SYSTEM,
+                        "input": finetune_input_snippet(
+                            text, FINETUNE_INPUT_MAX_CHARS
+                        ),
                         "output": output_block,
                     }
                 )
