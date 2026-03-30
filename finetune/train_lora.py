@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--base-model",
         type=str,
-        default="MLP-KTLim/llama-3-Korean-Bllossom-8B-gguf-Q4_K_M",
+        default="MLP-KTLim/llama-3-Korean-Bllossom-8B",
         help="베이스 Causal LM (허브 id 또는 로컬 경로)",
     )
     p.add_argument("--epochs", type=float, default=2.0)
@@ -179,7 +179,6 @@ def main() -> None:
         save_total_limit=2,
         bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
         fp16=torch.cuda.is_available() and not torch.cuda.is_bf16_supported(),
-        max_seq_length=args.max_length,
         packing=False,
     )
 
@@ -189,7 +188,9 @@ def main() -> None:
         train_dataset=ds,
         dataset_text_field="text",
         peft_config=lora,
+        max_seq_length=args.max_length,
     )
+
     try:
         trainer = SFTTrainer(processing_class=tokenizer, **trainer_kwargs)
     except TypeError:

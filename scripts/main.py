@@ -1,8 +1,11 @@
 import os
 import json
 import re
+import time
 from typing import Any
 import requests
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import ReadTimeout, Timeout
 from PyPDF2 import PdfReader
 from kiwipiepy import Kiwi
 
@@ -18,8 +21,14 @@ WRITE_FINETUNE = True
 PDF_DIR = "pdfdata"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:3b"
-# 4줄 전부 생성 전에 잘리지 않도록 여유 있게 설정
-OLLAMA_NUM_PREDICT = 768
+# title~tl_summary 4줄 + 세 문장 요약이 중간에 끊기지 않도록 여유 있게 설정
+OLLAMA_NUM_PREDICT = 1536
+# Ollama가 응답을 끝낼 때까지 기다리는 최대 시간(초).
+# 짧으면 Read timed out — PDF가 길거나 GPU가 느리면 300초를 넘기기 쉽다.
+OLLAMA_CONNECT_TIMEOUT = 30
+OLLAMA_READ_TIMEOUT = 900
+# 타임아웃·일시 연결 실패 시 재시도 횟수(추가)
+OLLAMA_HTTP_RETRIES = 2
 
 METADATA_SYSTEM = (
     "당신은 법률 원문을 분석하여 요약·메타데이터를 생성하는 AI입니다. 매 요청마다 system으로 전달되는 지시와 출력 형식을 그대로 따르세요."
@@ -43,8 +52,12 @@ METADATA_SYSTEM = (
     "- 반드시 '조사(~및, ~에 관한, ~등)'를 제거한 완성된 명사형으로 출력하라.\n"
     "- 예: '공예문화산업진흥법및' (X) -> '공예문화산업법' (O)\n\n"
     "[tl_summary]\n"
-    "- 반드시 세 문장(마침표 3개 이상). ①개정 결론(무엇이 어떻게 바뀌는지) ②변경 전·후 ③시행일 또는 기대 효과.\n"
-    "- 문장 내 '있 음', '개 정 안'과 같은 비정상적 공백은 반드시 제거하여 자연스러운 문장으로 작성하라.\n"
+    "- 반드시 세 문장(마침표 3개 이상). 각 문장은 주어·서술어를 갖춘 **완결 문장**으로 끝낸다. 중간에 끊기지 않게 한다.\n"
+    "- ① 개정 취지(무엇이 어떻게 바뀌는지) ② 문제 인식 또는 개정 전·후 ③ 시행일·기대 효과·정리 중 하나로 마무리.\n"
+    "- **출력 문자**: 한글·숫자·공백·마침표·쉼표·가운뎃점(ㆍ) 위주. 영단어·독일어 등 라틴 문자, 일본어, 중국어 **간체·한자 단독 표기 금지**(법 용어는 한글로 풀어쓴다. 예: 죄, 퇴직, 규정).\n"
+    "- 조문 번호 나열·'(생략)'·'∼' 위주 인용·정의 조항 베끼기 금지. 법안 **이유·취지** 수준으로만 요약한다.\n"
+    "- 띄어쓰기 규칙을 지켜 읽기 쉬운 문장으로 쓴다. 글자를 붙여 한 줄로만 쓰지 말 것.\n"
+    "- 문장 내 '있 음', '개 정 안', '배 우자' 같이 어색하게 끼인 공백 금지.\n"
     '"요약 없음"·한 문장만·빈 값 금지.\n\n'
     "[공통]\n"
     "- 설명·인사·JSON·코드펜스·추가 줄 금지. 위 4키만, 키 이름 철자 정확히 title, bc_id, sc_keyword, tl_summary.\n"
@@ -156,22 +169,47 @@ def parse_llm_metadata_block(raw: str) -> dict[str, str]:
 
 def generate_summary_ollama(text: str, bc_block: str) -> str:
     prompt = metadata_user_prompt(text, bc_block)
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": OLLAMA_MODEL,
-            "system": METADATA_SYSTEM,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.3,
-                "num_predict": OLLAMA_NUM_PREDICT,
-            },
+    payload = {
+        "model": OLLAMA_MODEL,
+        "system": METADATA_SYSTEM,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.3,
+            "num_predict": OLLAMA_NUM_PREDICT,
         },
-        timeout=300,
-    )
-    response.raise_for_status()
-    return response.json()["response"].strip()
+    }
+    timeout = (OLLAMA_CONNECT_TIMEOUT, OLLAMA_READ_TIMEOUT)
+    last_err: BaseException | None = None
+    for attempt in range(OLLAMA_HTTP_RETRIES + 1):
+        try:
+            response = requests.post(
+                OLLAMA_URL,
+                json=payload,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return response.json()["response"].strip()
+        except (ReadTimeout, Timeout) as e:
+            last_err = e
+            if attempt < OLLAMA_HTTP_RETRIES:
+                wait = 5 * (attempt + 1)
+                print(
+                    f"  Ollama 응답 지연(타임아웃), {wait}초 후 재시도 "
+                    f"({attempt + 1}/{OLLAMA_HTTP_RETRIES})…"
+                )
+                time.sleep(wait)
+        except RequestsConnectionError as e:
+            last_err = e
+            if attempt < OLLAMA_HTTP_RETRIES:
+                wait = 5 * (attempt + 1)
+                print(
+                    f"  Ollama 연결 실패, {wait}초 후 재시도 "
+                    f"({attempt + 1}/{OLLAMA_HTTP_RETRIES})…"
+                )
+                time.sleep(wait)
+    assert last_err is not None
+    raise last_err
 
 
 # ==============================
@@ -211,6 +249,95 @@ def clean_text(text: str) -> str:
     text = re.sub(r"([가-힣])\s+([음함임됨])", r"\1\2", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+# LLM 출력에 섞이기 쉬운 오탈·이종 문자 (긴 것부터)
+_SUBSTR_FIXES: tuple[tuple[str, str], ...] = (
+    ("자sal위해", "자살 위해"),
+    ("자Sal위해", "자살 위해"),
+    ("제19조삭 제", "제19조 삭제"),
+    ("없음 이분명한", "없음이 분명한"),
+    ("임 기를", "임의를"),
+    ("1 00분의", "100분의"),
+    (" 입찰 참 gia ", " 입찰 참가 "),
+    ("참 gia ", "참가 "),
+    (" gia ", " 가 "),
+    (" address한다", " 보완한다"),
+    ("Regel", "규정"),
+    ("regel", "규정"),
+    ("배 우자", "배우자"),
+    ("수급권 자", "수급권자"),
+)
+
+_HANZI_TO_HANGUL: tuple[tuple[str, str], ...] = (
+    ("위헌결定的", "위헌결정적"),
+    ("규定", "규정"),
+    ("权리", "권리"),
+    ("退직", "퇴직"),
+    ("除く", "제외하고"),
+    ("规定", "규정"),
+    ("罪", "죄"),
+    ("权", "권"),
+)
+
+# 요약이 생성 도중 잘린 것으로 보일 때(폴백: extract_summary)
+_TL_SUMMARY_BAD_ENDINGS: tuple[str, ...] = (
+    "근거",
+    "패러다임",
+    "적시",
+    "연기함",
+    "하고있어임",
+    "미비하여해임",
+    "운송사",
+    "개인으로규정하고있어임",
+    "삭제ㆍ임",
+)
+
+
+def normalize_llm_output_text(s: str) -> str:
+    """모델·OCR 혼입 문자·흔한 오타를 한국어 쪽으로 정리."""
+    if not s:
+        return s
+    t = s.replace("\ufeff", "")
+    for a, b in _SUBSTR_FIXES:
+        t = t.replace(a, b)
+    for a, b in _HANZI_TO_HANGUL:
+        t = t.replace(a, b)
+    # 조사 앞 불필요 공백 (예: 해임 을 → 해임을)
+    t = re.sub(
+        r"([가-힣]{2,})\s+(을|를|이|가|은|는|과|와)(?=[가-힣\s]|$)",
+        r"\1\2",
+        t,
+    )
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def loosen_dense_hangul_summary(s: str) -> str:
+    """공백이 거의 없는 '벽돌' 한글 요약을 형태소 경계로 띄어쓴다."""
+    if not s or len(s) < 35:
+        return s
+    if (s.count(" ") / len(s)) > 0.045:
+        return s
+    try:
+        return " ".join(tok.form for tok in kiwi.tokenize(s))
+    except Exception:
+        return s
+
+
+def is_tl_summary_truncated_or_broken(s: str) -> bool:
+    t = (s or "").strip()
+    if len(t) < 40:
+        return True
+    periods = t.count(".") + t.count("。")
+    if periods < 2:
+        return True
+    core = t.rstrip(". …")
+    for end in _TL_SUMMARY_BAD_ENDINGS:
+        if core.endswith(end):
+            return True
+    return False
 
 
 # ==============================
@@ -353,12 +480,22 @@ def build_record_for_pdf(
     raw_output = generate_summary_ollama(text, bc_block)
     parsed = parse_llm_metadata_block(raw_output)
 
-    title = (parsed.get("title") or "").strip() or extract_title(text)
+    title = normalize_llm_output_text(
+        (parsed.get("title") or "").strip() or extract_title(text)
+    )
     bc_id = normalize_bc_id(parsed.get("bc_id"), text)
-    keyword = (parsed.get("sc_keyword") or "").strip() or extract_keyword(title)
-    summary = (parsed.get("tl_summary") or "").strip()
-    if not summary or summary.count(".") < 2:
+    keyword = normalize_llm_output_text(
+        (parsed.get("sc_keyword") or "").strip() or extract_keyword(title)
+    )
+    summary = normalize_llm_output_text((parsed.get("tl_summary") or "").strip())
+    summary = loosen_dense_hangul_summary(summary)
+    if (
+        not summary
+        or summary.count(".") + summary.count("。") < 2
+        or is_tl_summary_truncated_or_broken(summary)
+    ):
         summary = extract_summary(text)
+        summary = normalize_llm_output_text(loosen_dense_hangul_summary(summary))
 
     block = format_metadata_block(title, bc_id, keyword, summary)
     meta_row = {
