@@ -13,6 +13,7 @@ Llama 등 게이트 모델은 Hugging Face 토큰이 필요할 수 있음 (Colab
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 
 import torch
@@ -79,6 +80,7 @@ def example_to_text(tokenizer, example: dict) -> str:
 def main() -> None:
     args = parse_args()
     os.makedirs(args.out, exist_ok=True)
+    hf_token = os.environ.get("HF_TOKEN")
 
     if not os.path.isfile(args.data):
         raise SystemExit(f"데이터 파일 없음: {args.data}")
@@ -111,8 +113,13 @@ def main() -> None:
         device_map="auto" if torch.cuda.is_available() else None,
         torch_dtype=dtype if bnb_config is None else None,
         trust_remote_code=True,
+        token=hf_token,
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.base_model,
+        trust_remote_code=True,
+        token=hf_token,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -169,7 +176,7 @@ def main() -> None:
         ],
     )
 
-    sft_config = SFTConfig(
+    sft_common = dict(
         output_dir=args.out,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
@@ -182,20 +189,33 @@ def main() -> None:
         fp16=torch.cuda.is_available() and not torch.cuda.is_bf16_supported(),
         packing=False,
     )
-
+    # TRL 버전마다 dataset_text_field / max_seq_length 가 SFTConfig 또는 SFTTrainer 한쪽에만 있다.
+    cfg_params = set(inspect.signature(SFTConfig.__init__).parameters)
+    tr_params = set(inspect.signature(SFTTrainer.__init__).parameters)
+    text_seq = {
+        "dataset_text_field": "text",
+        "max_seq_length": args.max_length,
+    }
+    on_cfg = {k: v for k, v in text_seq.items() if k in cfg_params}
+    on_tr = {
+        k: v
+        for k, v in text_seq.items()
+        if k in tr_params and k not in on_cfg
+    }
+    sft_config = SFTConfig(**sft_common, **on_cfg)
     trainer_kwargs = dict(
         model=model,
         args=sft_config,
         train_dataset=ds,
-        dataset_text_field="text",
         peft_config=lora,
-        max_seq_length=args.max_length,
+        **on_tr,
     )
-
-    try:
+    if "processing_class" in tr_params:
         trainer = SFTTrainer(processing_class=tokenizer, **trainer_kwargs)
-    except TypeError:
+    elif "tokenizer" in tr_params:
         trainer = SFTTrainer(tokenizer=tokenizer, **trainer_kwargs)
+    else:
+        trainer = SFTTrainer(**trainer_kwargs)
 
     trainer.train()
     trainer.save_model(args.out)
