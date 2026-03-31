@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Cursor: 사용자별 설정 무시, rules는 팀 공유용으로 커밋
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
+.cursor/rules/**
+
+.vscode
+.cursorrules
+
+files/
+*/docs/
+docs/
+
+.history/
+**/.history/
+
+backend/app/ocr/config.py
+.cursor/rules/frontend_style.mdc
+ollama_server/
+backend/app/summary/config.py

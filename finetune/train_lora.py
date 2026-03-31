@@ -39,7 +39,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--base-model",
         type=str,
-        default="MLP-KTLim/llama-3-Korean-Bllossom-8B",
+        # default="MLP-KTLim/llama-3-Korean-Bllossom-8B",
+        default="Bllossom/llama-3.2-Korean-Bllossom-3B",
         help="베이스 Causal LM (허브 id 또는 로컬 경로)",
     )
     p.add_argument("--epochs", type=float, default=2.0)

@@ -135,7 +135,21 @@ VALID_BC_IDS = {int(c["id"]) for c in DB_BIG_CATEGORIES}
 def assign_bc_id(text: str) -> int:
     category_map = {
         1: ["정치", "행정", "지방자치", "공무원", "선거", "자치단체"],
-        2: ["경제", "산업", "금융", "조세", "세법", "기업", "공정거래", "재정", "조세특례", "상속세", "증여세", "자본시장", "펀드"],
+        2: [
+            "경제",
+            "산업",
+            "금융",
+            "조세",
+            "세법",
+            "기업",
+            "공정거래",
+            "재정",
+            "조세특례",
+            "상속세",
+            "증여세",
+            "자본시장",
+            "펀드",
+        ],
         3: ["복지", "장애인", "보건", "의료", "노동", "가족", "연금", "유족"],
         4: [
             "법사",
@@ -152,12 +166,45 @@ def assign_bc_id(text: str) -> int:
             "징역",
             "병역",
         ],
-        5: ["교육", "문화", "콘텐츠", "예술", "체육", "관광", "언론", "방송", "박물관", "미술관", "공예", "대중문화"],
-        6: ["과학", "기술", "정보통신", "인공지능", "데이터", "원자력", "정보보호", "정보통신망"],
+        5: [
+            "교육",
+            "문화",
+            "콘텐츠",
+            "예술",
+            "체육",
+            "관광",
+            "언론",
+            "방송",
+            "박물관",
+            "미술관",
+            "공예",
+            "대중문화",
+        ],
+        6: [
+            "과학",
+            "기술",
+            "정보통신",
+            "인공지능",
+            "데이터",
+            "원자력",
+            "정보보호",
+            "정보통신망",
+        ],
         7: ["국방", "외교", "통일", "군사", "안보"],
         8: ["환경", "에너지", "기후", "자원", "폐기물"],
         9: ["농림", "축산", "식품", "해양", "수산"],
-        10: ["국토", "교통", "주택", "건설", "도로", "철도", "항공", "소방", "하도급", "계약"],
+        10: [
+            "국토",
+            "교통",
+            "주택",
+            "건설",
+            "도로",
+            "철도",
+            "항공",
+            "소방",
+            "하도급",
+            "계약",
+        ],
     }
 
     scores = {k: 0 for k in category_map}
@@ -406,8 +453,7 @@ _SUMMARY_CONTAMINATION_RE = re.compile(
 )
 
 _VIETNAM_LATIN_RE = re.compile(
-    r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩị"
-    r"òóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđĐ]"
+    r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩị" r"òóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđĐ]"
 )
 
 _SUMMARY_NOISE_RE = re.compile(
@@ -494,11 +540,7 @@ def sc_keyword_plausible(keyword: str, text: str, title: str) -> bool:
     parts = [p.strip() for p in re.split(r"[,，]", keyword) if len(p.strip()) >= 2]
     if not parts:
         return False
-    hits = sum(
-        1
-        for p in parts
-        if p in blob or re.sub(r"\s+", "", p) in blob_c
-    )
+    hits = sum(1 for p in parts if p in blob or re.sub(r"\s+", "", p) in blob_c)
     return hits >= (len(parts) + 1) // 2
 
 
@@ -749,7 +791,8 @@ def build_record_for_pdf(
             )
         if (
             not summary
-            or summary.count(".") + summary.count("。") < RULES.summary_min_sentence_punct
+            or summary.count(".") + summary.count("。")
+            < RULES.summary_min_sentence_punct
             or is_tl_summary_truncated_or_broken(summary)
         ):
             summary = extract_summary(text)
@@ -811,9 +854,7 @@ def process_all() -> None:
                     {
                         # Worker 추론 시 system 자리와 동일 문자열 → LoRA가 현장 계약과 맞춤
                         "instruction": METADATA_SYSTEM,
-                        "input": finetune_input_snippet(
-                            text, FINETUNE_INPUT_MAX_CHARS
-                        ),
+                        "input": finetune_input_snippet(text, FINETUNE_INPUT_MAX_CHARS),
                         "output": output_block,
                     }
                 )
