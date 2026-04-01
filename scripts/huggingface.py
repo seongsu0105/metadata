@@ -1,23 +1,63 @@
+import argparse
 import os
 from dotenv import load_dotenv
 from huggingface_hub import HfApi, login
 
-# 1. 설정
-load_dotenv()  # .env 파일을 읽어옵니다.
-token = os.getenv("HF_TOKEN")
-login(token=token)
-repo_id = "seongsu0105/blossom-8b-adapter"  # 저장소 이름
-local_folder_path = "./result/2"  # 파일들이 들어있는 폴더 경로
 
-# 2. 허깅페이스 API 호출
-api = HfApi()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="학습 산출 폴더를 Hugging Face 모델 저장소로 업로드"
+    )
+    parser.add_argument(
+        "--repo-id",
+        type=str,
+        default=os.getenv("HF_REPO_ID", "seongsu0105/blossom-8b-adapter"),
+        help="업로드 대상 Hugging Face repo id (예: username/model-name)",
+    )
+    parser.add_argument(
+        "--local-folder",
+        type=str,
+        default=os.getenv("HF_LOCAL_FOLDER", "./result/2"),
+        help="업로드할 로컬 폴더 경로",
+    )
+    parser.add_argument(
+        "--private",
+        action="store_true",
+        help="repo가 없을 때 private 모델 저장소로 생성",
+    )
+    return parser.parse_args()
 
-# 3. 저장소 생성 (이미 있으면 넘어가고, 없으면 만듭니다)
-api.create_repo(repo_id=repo_id, token=token, repo_type="model", exist_ok=True)
 
-# 4. 폴더 내 모든 파일 업로드 (safetensors, json 등 한꺼번에)
-api.upload_folder(
-    folder_path=local_folder_path, repo_id=repo_id, repo_type="model", token=token
-)
+def main() -> None:
+    load_dotenv()
+    args = parse_args()
 
-print(f" 업로드 완료! 저장소: https://huggingface.co/{repo_id}")
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        raise SystemExit("HF_TOKEN 이 비어 있습니다. 환경 변수/Secrets를 확인하세요.")
+
+    folder = os.path.abspath(args.local_folder)
+    if not os.path.isdir(folder):
+        raise SystemExit(f"업로드 폴더를 찾을 수 없습니다: {folder}")
+
+    login(token=token)
+    api = HfApi()
+
+    api.create_repo(
+        repo_id=args.repo_id,
+        token=token,
+        repo_type="model",
+        private=args.private,
+        exist_ok=True,
+    )
+    api.upload_folder(
+        folder_path=folder,
+        repo_id=args.repo_id,
+        repo_type="model",
+        token=token,
+    )
+    print(f"업로드 완료: https://huggingface.co/{args.repo_id}")
+
+
+if __name__ == "__main__":
+    main()

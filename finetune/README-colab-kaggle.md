@@ -2,10 +2,12 @@
 
 플랫폼별 **단계별 순서**는 아래 문서만 보면 된다.
 
-- **[Colab 전용 실행 순서](README-colab.md)** — GPU: **L4 우선**, 무료는 **T4 + `--use-4bit`**
-- **[Kaggle 전용 실행 순서](README-kaggle.md)** — **GPU 켜기**, 8B는 **`--use-4bit` 권장**
+- **[Colab 전용 실행 순서](README-colab.md)** — 노트북: `finetune/colab_train.ipynb`
+- **[Kaggle 전용 실행 순서](README-kaggle.md)** — 노트북: `finetune/kaggle_train.ipynb`
 
 `../scripts/main.py`로 만든 **`finetune_dataset.jsonl`**(각 줄: `instruction`, `input`, `output`)을 넣고, 이 폴더의 `train_lora.py`로 어댑터를 학습한다. 기본 베이스 모델은 **`MLP-KTLim/llama-3-Korean-Bllossom-8B`** 이다.
+
+학습 직후 업로드가 필요하면 노트북의 `ENABLE_UPLOAD=True`와 `HF_REPO_ID`를 설정하고, `HF_TOKEN`(Colab/Kaggle Secrets)을 넣으면 노트북 셀 내부 `huggingface_hub` 호출로 자동 업로드된다.
 
 ## 로컬 vs Colab / Kaggle 역할 (꼭 확인)
 

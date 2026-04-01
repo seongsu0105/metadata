@@ -3,6 +3,7 @@ import json
 import re
 import time
 import unicodedata
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 import requests
@@ -44,6 +45,54 @@ OLLAMA_READ_TIMEOUT = 900
 # 타임아웃·일시 연결 실패 시 재시도 횟수(추가)
 OLLAMA_HTTP_RETRIES = 2
 METADATA_QUALITY_RETRIES = 2
+# 속도 옵션 (환경 변수로 제어 — 품질↓, 초안·대량 처리용)
+#   METADATA_FAST=1           → 품질 재시도 0회, 프롬프트·출력 토큰 축소
+#   METADATA_MAX_PDFS=N       → 정렬된 PDF 중 앞 N건만 처리 (0 또는 미설정 = 전체)
+#   METADATA_PARALLEL_WORKERS=k → 프로세스 k개 (기본 1). GPU Ollama 1대면 보통 1 권장.
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def metadata_fast_enabled() -> bool:
+    return _env_truthy("METADATA_FAST")
+
+
+def effective_quality_retries() -> int:
+    return 0 if metadata_fast_enabled() else METADATA_QUALITY_RETRIES
+
+
+def effective_ollama_num_predict() -> int:
+    if metadata_fast_enabled():
+        return min(OLLAMA_NUM_PREDICT, 512)
+    return OLLAMA_NUM_PREDICT
+
+
+def effective_prompt_max_chars() -> int:
+    return 2800 if metadata_fast_enabled() else 4000
+
+
+def max_pdf_files_env() -> int:
+    raw = os.environ.get("METADATA_MAX_PDFS", "").strip()
+    if not raw:
+        return 0
+    try:
+        n = int(raw)
+    except ValueError:
+        return 0
+    return max(0, n)
+
+
+def parallel_workers_env() -> int:
+    raw = os.environ.get("METADATA_PARALLEL_WORKERS", "").strip()
+    if not raw:
+        return 1
+    try:
+        k = int(raw)
+    except ValueError:
+        return 1
+    return max(1, k)
 
 # ----- Worker summary_prompts.py 와 동일 계약 (메타데이터 전용) -----
 BASE_SYSTEM_COMMON = (
@@ -263,7 +312,9 @@ def parse_llm_metadata_block(raw: str) -> dict[str, str]:
 
 
 def generate_summary_ollama(text: str, bc_block: str) -> str:
-    prompt = metadata_user_prompt(text, bc_block)
+    prompt = metadata_user_prompt(
+        text, bc_block, max_summary_chars=effective_prompt_max_chars()
+    )
     payload = {
         "model": OLLAMA_MODEL,
         "system": METADATA_SYSTEM,
@@ -271,7 +322,7 @@ def generate_summary_ollama(text: str, bc_block: str) -> str:
         "stream": False,
         "options": {
             "temperature": 0.3,
-            "num_predict": OLLAMA_NUM_PREDICT,
+            "num_predict": effective_ollama_num_predict(),
         },
     }
     timeout = (OLLAMA_CONNECT_TIMEOUT, OLLAMA_READ_TIMEOUT)
@@ -461,11 +512,18 @@ _SUMMARY_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SUMMARY_TABLE_MARKER_RE = re.compile(
+    r"의안\s*명|대표\s*발의|발의\s*일자|심사\s*경과|법률제\s*호|신[ㆍ·]\s*구조문|건명",
+    re.IGNORECASE,
+)
+
 
 def summary_should_use_extract_fallback(summary: str) -> bool:
     """R6·R7: 조문 베끼기·이종어 비율."""
     s = summary or ""
     if _SUMMARY_CONTAMINATION_RE.search(s):
+        return True
+    if _SUMMARY_TABLE_MARKER_RE.search(s):
         return True
     if _VIETNAM_LATIN_RE.search(s):
         return True
@@ -524,7 +582,7 @@ def scrub_sc_keyword(keyword: str) -> str:
     for p in parts:
         t = re.sub(r"[^\s0-9가-힣·]", "", p).strip()
         t = _strip_long_latin_tokens(t)
-        t = re.sub(r"\s+", " ", t)
+        t = re.sub(r"\s+", "", t)
         if t:
             cleaned.append(t)
     return ", ".join(cleaned[:2]) if cleaned else ""
@@ -614,6 +672,10 @@ def is_tl_summary_truncated_or_broken(s: str) -> bool:
     """R10: 특정 단어 나열 없이 길이·마침표 개수·끝 문장부호로만 판단."""
     t = (s or "").strip()
     if len(t) < RULES.summary_min_chars:
+        return True
+    if _SUMMARY_TABLE_MARKER_RE.search(t):
+        return True
+    if t.endswith("건명"):
         return True
     periods = t.count(".") + t.count("。")
     if periods < RULES.summary_min_sentence_punct:
@@ -717,33 +779,44 @@ def extract_keyword(title: str) -> str:
 def extract_summary(text: str) -> str:
     text = re.sub(r"-\s*\d+\s*-", " ", text)
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"([가-힣]) ([가-힣])", r"\1\2", text)
-    text = re.sub(r"([가-힣]) ([가-힣])", r"\1\2", text)
+    start_m = re.search(r"(?:2\.\s*)?대안의\s*제안\s*이유|제안\s*이유", text)
+    if start_m:
+        target = text[start_m.end() :]
+    else:
+        parts = re.split(r"(?:제안\s*이유|제안이유)(?:및주요내용)?|주요\s*내용", text, maxsplit=1)
+        target = parts[-1] if len(parts) > 1 else text[:1000]
 
-    split_rx = r"(?:제안\s*이유|제안이유)(?:및주요내용)?|주요\s*내용"
-    parts = re.split(split_rx, text, maxsplit=1)
-    if len(parts) < 2:
-        snip = text[:800].strip()
-        return snip if snip else text[:480]
+    end_m = re.search(
+        r"(?:3\.\s*)?대안의\s*주요\s*내용|법률제\s*호|부\s*칙|신[ㆍ·]\s*구조문|의안\s*명|심사\s*경과",
+        target,
+    )
+    if end_m:
+        target = target[: end_m.start()]
 
-    target = parts[-1]
-    cutoff = re.search(r"발의자\s*:|법률제\s*호|부\s*칙|신ㆍ구조문|신·구조문", target)
-    if cutoff:
-        target = target[: cutoff.start()]
-
-    target = re.sub(r"의안\s*번호.*$", "", target, flags=re.DOTALL)
     target = re.sub(r"\(안제[^)]+\)", "", target)
-    target = re.sub(r"\s+\.", ".", target)
+    target = re.sub(r"의안\s*번호.*$", "", target, flags=re.DOTALL)
     target = re.sub(r"\s+", " ", target).strip()
 
-    sentences = re.split(r"(?<=[음임함됨])\s*", target)
-    sentences = [s.strip() for s in sentences if len(s.strip()) >= 20]
+    cands = re.split(r"(?<=[\.\?!다음임함됨])\s+", target)
+    sentences: list[str] = []
+    for c in cands:
+        s = c.strip(" .")
+        if len(s) < 20:
+            continue
+        if _SUMMARY_TABLE_MARKER_RE.search(s):
+            continue
+        if s.startswith(("가.", "나.", "다.", "라.", "마.")):
+            continue
+        sentences.append(s + ".")
 
     if not sentences:
-        return (target[:800] if target else text[:800]).strip() or text[:480]
+        fallback = target[:420].strip() or text[:420].strip()
+        return fallback if fallback.endswith(".") else (fallback + ".")
 
-    merged = " ".join(sentences[:4])
-    return merged if len(merged) >= 80 else text[:800].strip() or merged
+    out = " ".join(sentences[:3]).strip()
+    if not out.endswith("."):
+        out += "."
+    return out
 
 
 def format_metadata_block(
@@ -767,7 +840,7 @@ def build_record_for_pdf(
     best_block = ""
     best_score = -1
 
-    for _ in range(METADATA_QUALITY_RETRIES + 1):
+    for _ in range(effective_quality_retries() + 1):
         raw_output = generate_summary_ollama(text, bc_block)
         parsed = parse_llm_metadata_block(raw_output)
 
@@ -823,6 +896,41 @@ def build_record_for_pdf(
     raise RuntimeError("메타데이터 생성 실패: 유효한 요약을 만들지 못했습니다.")
 
 
+def _process_one_pdf_file(
+    file: str, pdf_dir: str, bc_block: str
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+    """단일 PDF → (파일명, 메타 row 또는 None, 파인튜닝 row 또는 None). 병렬 워커에서도 사용."""
+    try:
+        path = os.path.join(pdf_dir, file)
+        reader = PdfReader(path)
+        text = " ".join(
+            p.extract_text() or "" for p in reader.pages if p.extract_text()
+        )
+        text = clean_text(text)
+
+        if len(text) < 100:
+            return file, None, None
+
+        meta_row, output_block = build_record_for_pdf(file, text, bc_block)
+        ft: dict[str, Any] | None = None
+        if WRITE_FINETUNE:
+            ft = {
+                "instruction": METADATA_SYSTEM,
+                "input": finetune_input_snippet(text, FINETUNE_INPUT_MAX_CHARS),
+                "output": output_block,
+            }
+        return file, meta_row, ft
+    except Exception as e:
+        print(f"에러: {file}, {e}")
+        return file, None, None
+
+
+def _process_one_pdf_file_star(args: tuple[str, str, str]) -> tuple[
+    str, dict[str, Any] | None, dict[str, Any] | None
+]:
+    return _process_one_pdf_file(*args)
+
+
 def process_all() -> None:
     pdf_dir = PDF_DIR
     meta_path = METADATA_JSONL
@@ -831,38 +939,36 @@ def process_all() -> None:
 
     bc_block = build_big_categories_block(DB_BIG_CATEGORIES)
 
-    for file in sorted(os.listdir(pdf_dir)):
-        if not file.endswith(".pdf"):
-            continue
+    files = sorted(f for f in os.listdir(pdf_dir) if f.endswith(".pdf"))
+    cap = max_pdf_files_env()
+    if cap > 0:
+        files = files[:cap]
 
-        try:
-            path = os.path.join(pdf_dir, file)
-            reader = PdfReader(path)
-            text = " ".join(
-                p.extract_text() or "" for p in reader.pages if p.extract_text()
+    workers = parallel_workers_env()
+    if workers == 1:
+        for file in files:
+            file_, meta_row, ft = _process_one_pdf_file(file, pdf_dir, bc_block)
+            if meta_row is not None:
+                meta_rows.append(meta_row)
+                print(f"완료: {file_}")
+            if ft is not None:
+                finetune_rows.append(ft)
+    else:
+        print(
+            "참고: 병렬 시 Ollama에 동시 요청이 들어갑니다. GPU 1대·VRAM 여유 없으면 "
+            "METADATA_PARALLEL_WORKERS=1 이 더 빠를 수 있습니다."
+        )
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            results = ex.map(
+                _process_one_pdf_file_star,
+                [(f, pdf_dir, bc_block) for f in files],
             )
-            text = clean_text(text)
-
-            if len(text) < 100:
-                continue
-
-            meta_row, output_block = build_record_for_pdf(file, text, bc_block)
-            meta_rows.append(meta_row)
-
-            if WRITE_FINETUNE:
-                finetune_rows.append(
-                    {
-                        # Worker 추론 시 system 자리와 동일 문자열 → LoRA가 현장 계약과 맞춤
-                        "instruction": METADATA_SYSTEM,
-                        "input": finetune_input_snippet(text, FINETUNE_INPUT_MAX_CHARS),
-                        "output": output_block,
-                    }
-                )
-
-            print(f"완료: {file}")
-
-        except Exception as e:
-            print(f"에러: {file}, {e}")
+        for file_, meta_row, ft in results:
+            if meta_row is not None:
+                meta_rows.append(meta_row)
+                print(f"완료: {file_}")
+            if ft is not None:
+                finetune_rows.append(ft)
 
     with open(meta_path, "w", encoding="utf-8") as f:
         for r in meta_rows:

@@ -1,6 +1,7 @@
 # Kaggle 전용 — LoRA 파인튜닝 순서
 
 공통 개요·데이터 스키마·자주 나는 오류는 [`README-colab-kaggle.md`](README-colab-kaggle.md)를 본다.
+실행 노트북: `finetune/kaggle_train.ipynb`
 
 ## 런타임 GPU (권장)
 
@@ -29,4 +30,8 @@ python /kaggle/input/<코드-데이터셋>/train_lora.py \
   --use-4bit
 ```
 
-7. 세션 종료 후 `/kaggle/working` 만 유지되므로, 어댑터를 zip으로 묶어 **Output**에서 내려받거나 다음 Dataset으로 올린다.
+7. 자동 허브 업로드를 쓰려면:
+   - Kaggle Secrets에 `HF_TOKEN` 저장
+   - 노트북에서 `ENABLE_UPLOAD=True`, `HF_REPO_ID="<내 저장소>"` 설정
+   - 학습 셀 완료 후 업로드 셀이 `huggingface_hub` API를 직접 호출해 `/kaggle/working/lora-output`을 업로드
+8. 세션 종료 후 `/kaggle/working` 만 유지되므로, 업로드를 안 쓸 때는 어댑터를 zip으로 묶어 **Output**에서 내려받거나 다음 Dataset으로 올린다.

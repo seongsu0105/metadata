@@ -1,6 +1,7 @@
 # Colab 전용 — LoRA 파인튜닝 순서
 
 공통 개요·데이터 스키마·자주 나는 오류는 [`README-colab-kaggle.md`](README-colab-kaggle.md)를 본다.
+실행 노트북: `finetune/colab_train.ipynb`
 
 ## 런타임 GPU (권장)
 
@@ -44,3 +45,7 @@ python train_lora.py \
 7. **T4**이거나 OOM이면 `--use-4bit`를 명령 끝에 추가한다.
 
 8. `--out` 폴더: LoRA 가중치 + 토크나이저. 추론 시 동일 베이스 id와 `PeftModel.from_pretrained`로 로드한다.
+9. 자동 허브 업로드를 쓰려면:
+   - Colab Secrets에 `HF_TOKEN` 저장
+   - 노트북에서 `ENABLE_UPLOAD=True`, `HF_REPO_ID="<내 저장소>"` 설정
+   - 학습 셀 완료 후 업로드 셀이 `huggingface_hub` API를 직접 호출해 `<OUTPUT_DIR>`을 업로드
