@@ -21,14 +21,14 @@ from kiwipiepy import Kiwi
 #   본 스크립트는 생성하지 않음. 필요 시 Worker·별도 파이프라인으로
 #   instruction/output 형식이 다른 JSONL을 만든다.
 # ---------------------------------------------------------------------------
-METADATA_JSONL = "metadata.jsonl"
-FINETUNE_JSONL = "finetune_dataset.jsonl"
+METADATA_JSONL = "metadata2.jsonl"
+FINETUNE_JSONL = "finetune_dataset2.jsonl"
 WRITE_FINETUNE = True
 # 학습 input 상한·앵커(규칙 R10)
 FINETUNE_INPUT_MAX_CHARS = 6000
 FINETUNE_ANCHOR_MARGIN = 400
 
-PDF_DIR = "pdfdata"
+PDF_DIR = "pdfdata2"
 # 동일 폴더에 두면 from→to 치환을 추가 적용 (도메인 전용 보정, 없어도 동작)
 SANITIZE_OVERRIDES_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "metadata_sanitize_overrides.json"
