@@ -24,3 +24,4 @@ backend/app/ocr/config.py
 .cursor/rules/frontend_style.mdc
 ollama_server/
 backend/app/summary/config.py
+.env
