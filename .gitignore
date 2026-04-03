@@ -25,4 +25,5 @@ backend/app/ocr/config.py
 ollama_server/
 backend/app/summary/config.py
 .env
-.md
+
+*.md
