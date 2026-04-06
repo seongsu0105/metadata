@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import os
+import shutil
 
 import torch
 from datasets import load_dataset
@@ -182,8 +183,7 @@ def main() -> None:
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         logging_steps=10,
-        save_strategy="epoch",
-        save_total_limit=2,
+        save_strategy="no",
         bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
         fp16=torch.cuda.is_available() and not torch.cuda.is_bf16_supported(),
         packing=False,
@@ -196,11 +196,7 @@ def main() -> None:
         "max_seq_length": args.max_length,
     }
     on_cfg = {k: v for k, v in text_seq.items() if k in cfg_params}
-    on_tr = {
-        k: v
-        for k, v in text_seq.items()
-        if k in tr_params and k not in on_cfg
-    }
+    on_tr = {k: v for k, v in text_seq.items() if k in tr_params and k not in on_cfg}
     sft_config = SFTConfig(**sft_common, **on_cfg)
     trainer_kwargs = dict(
         model=model,
@@ -219,6 +215,13 @@ def main() -> None:
     trainer.train()
     trainer.save_model(args.out)
     tokenizer.save_pretrained(args.out)
+
+    # 학습 종료 후 생성된 checkpoint 폴더 삭제
+    for folder in os.listdir(args.out):
+        folder_path = os.path.join(args.out, folder)
+        if os.path.isdir(folder_path) and folder.startswith("checkpoint-"):
+            shutil.rmtree(folder_path)
+
     print(f"저장 완료: {args.out}")
 
 
