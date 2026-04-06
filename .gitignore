@@ -14,8 +14,6 @@ __pycache__/
 .env
 
 files/
-*/docs/
-docs/
 
 .history/
 **/.history/
@@ -26,4 +24,3 @@ ollama_server/
 backend/app/summary/config.py
 .env
 
-*.md

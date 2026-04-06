@@ -44,9 +44,9 @@ def parse_args() -> argparse.Namespace:
         default="MLP-KTLim/llama-3-Korean-Bllossom-8B",
         help="베이스 Causal LM (허브 id 또는 로컬 경로)",
     )
-    p.add_argument("--epochs", type=float, default=2.0)
+    p.add_argument("--epochs", type=float, default=3.0)
     p.add_argument("--batch-size", type=int, default=2)
-    p.add_argument("--grad-accum", type=int, default=4)
+    p.add_argument("--grad-accum", type=int, default=8)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--max-length", type=int, default=2048)
     p.add_argument("--lora-r", type=int, default=16)
