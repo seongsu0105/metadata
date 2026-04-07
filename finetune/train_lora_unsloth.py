@@ -1,18 +1,7 @@
-#!/usr/bin/env python3
-"""
-finetune_dataset.jsonl (instruction / input / output) → Unsloth + TRL SFT.
-
-- 프롬프트 직렬화는 train_lora.example_to_text 와 동일 (추론·학습 계약 일치).
-- GPU + Linux / Colab / Kaggle 환경 권장. 로컬 Windows에서는 Unsloth 미지원일 수 있음.
-
-예:
-  cd finetune
-  python train_lora_unsloth.py --data /content/finetune_dataset.jsonl --out ./lora-out
-
-환경 변수: HF_TOKEN — gated 모델·허브 push 시
-"""
-
 from __future__ import annotations
+
+from unsloth import FastLanguageModel
+from transformers import TrainingArguments
 
 import argparse
 import inspect
@@ -33,9 +22,15 @@ from train_lora import example_to_text
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Unsloth LoRA SFT (same JSONL as train_lora.py)")
-    p.add_argument("--data", type=str, required=True, help="finetune_dataset.jsonl 경로")
-    p.add_argument("--out", type=str, default="./lora-output-unsloth", help="어댑터 저장 디렉터리")
+    p = argparse.ArgumentParser(
+        description="Unsloth LoRA SFT (same JSONL as train_lora.py)"
+    )
+    p.add_argument(
+        "--data", type=str, required=True, help="finetune_dataset.jsonl 경로"
+    )
+    p.add_argument(
+        "--out", type=str, default="./lora-output-unsloth", help="어댑터 저장 디렉터리"
+    )
     p.add_argument(
         "--base-model",
         type=str,
@@ -49,7 +44,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-length", type=int, default=2048)
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
-    p.add_argument("--lora-dropout", type=float, default=0.0, help="0 권장(Unsloth·속도), 0.05는 train_lora 기본과 유사")
+    p.add_argument(
+        "--lora-dropout",
+        type=float,
+        default=0.0,
+        help="0 권장(Unsloth·속도), 0.05는 train_lora 기본과 유사",
+    )
     p.add_argument(
         "--use-4bit",
         action=argparse.BooleanOptionalAction,
@@ -81,8 +81,12 @@ def parse_args() -> argparse.Namespace:
         help="none | wandb | tensorboard 등 (wandb 사용 시 pip install wandb 및 로그인)",
     )
     p.add_argument("--wandb-run-name", type=str, default="bllossom-sft-unsloth")
-    p.add_argument("--push-to-hub", action="store_true", help="학습 종료 후 허브에 푸시")
-    p.add_argument("--hub-model-id", type=str, default="", help="예: username/repo-name")
+    p.add_argument(
+        "--push-to-hub", action="store_true", help="학습 종료 후 허브에 푸시"
+    )
+    p.add_argument(
+        "--hub-model-id", type=str, default="", help="예: username/repo-name"
+    )
     p.add_argument("--fp16", action="store_true", help="bf16 자동 대신 fp16 강제")
     p.add_argument("--bf16", action="store_true", help="fp16 자동 대신 bf16 강제")
     return p.parse_args()
@@ -180,9 +184,7 @@ def main() -> None:
         use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
         use_fp16 = torch.cuda.is_available() and not use_bf16
 
-    save_steps = (
-        args.save_steps if args.save_strategy == "steps" else None
-    )
+    save_steps = args.save_steps if args.save_strategy == "steps" else None
 
     sft_common: dict = dict(
         output_dir=args.out,
